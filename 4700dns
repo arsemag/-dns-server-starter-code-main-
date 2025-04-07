@@ -1,0 +1,108 @@
+#!/usr/bin/env -S python3 -u
+
+import argparse, socket, time, json, select, struct, sys, math
+from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A
+from io import StringIO
+
+class Server:
+    def __init__(self, root_ip, domain, port):
+        self.root_ip = root_ip
+        self.domain = domain
+
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket.bind(("0.0.0.0", port))
+        self.port = self.socket.getsockname()[1]
+
+        self.log("Bound to port %d" % self.port)
+
+        self.records = {}  # Add this before calling parse_zone_file
+        self.auth_domain = None
+        self.parse_zone_file(domain)
+
+    def log(self, message):
+        sys.stderr.write(message + "\n")
+        sys.stderr.flush()
+
+    def send(self, addr, message):
+        self.log("Sending message:\n%s" % message)
+        self.socket.sendto(message.pack(), addr)
+
+    def parse_zone_file(self, file_path):
+        with open(file_path, 'r') as f:
+            zone_text = f.read()
+
+        for rr in RR.fromZone(zone_text):
+            # Check if this is the SOA record
+            if rr.rtype == QTYPE.SOA:
+                # Store the domain (rname) from the SOA record as the authoritative domain
+                self.auth_domain = str(rr.rname)
+                self.log("Found SOA record for domain: %s" % self.auth_domain)
+
+            # Add the record to the records dictionary
+            name = str(rr.rname)
+            if name in self.records:
+                self.records[name].append(rr)
+            else:
+                self.records[name] = [rr]
+
+
+
+    def recv(self, socket):
+        data, addr = socket.recvfrom(65535)
+
+        # Parse DNS request
+        request = DNSRecord.parse(data)
+
+        self.log("Received message:\n%s" % request)
+
+        qname = str(request.q.qname)
+        qtype = QTYPE[request.q.qtype]
+
+        response = request.reply()
+
+
+        if qname in self.records:
+            for rr in self.records[qname]:
+                if QTYPE[rr.rtype] == qtype or qtype == "ANY":
+                    response.add_answer(rr)
+
+                    if rr.rtype == QTYPE.CNAME:
+                        response.add_answer(rr)
+                        cname_target = str(rr.rdata)
+                        if cname_target in self.records:
+                            for a_rr in self.records[cname_target]:
+                                if a_rr.rtype == QTYPE.A:
+                                    response.add_answer(a_rr)
+
+                    elif rr.rtype == QTYPE.NS:
+                        print("got here %s" % rr.rdata)
+                        ns_target = str(rr.rdata)
+                        if ns_target in self.records:
+                            for r in self.records[ns_target]:
+                                if QTYPE[r.rtype] == QTYPE.A:
+                                    response.add_rrset(r)
+
+
+        self.send(addr, response)
+
+
+    def in_zone(self, name):
+        return name == self.auth_domain
+
+    def run(self):
+        seq = 0
+        while True:
+            socks = select.select([self.socket], [], [], 0.1)[0]
+            for conn in socks:
+                self.recv(conn)
+
+        return
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='send data')
+    parser.add_argument('root_ip', type=str, help="The IP address of the root server")
+    parser.add_argument('zone', type=str, help="The zone file for this server")
+    parser.add_argument('--port', type=int, help="The port this server should bind to", default=0)
+    args = parser.parse_args()
+    sender = Server(args.root_ip, args.zone, args.port)
+    sender.run()
