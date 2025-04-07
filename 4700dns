@@ -63,10 +63,23 @@ class Server:
 
         if qname in self.records:
             for rr in self.records[qname]:
+                print("this is the types: ", QTYPE[rr.rtype])
                 if QTYPE[rr.rtype] == qtype or qtype == "ANY":
                     response.add_answer(rr)
+                    print("we sent a message with this types: ", QTYPE[rr.rtype], "and the qtype: ", qtype)
 
-                elif rr.rtype == QTYPE.CNAME:
+                    if QTYPE[rr.rtype] == "NS":
+                        print("this is we got her")
+                        ns_target = str(rr.rdata)
+                        if ns_target in self.records:
+                            response.add_auth(rr)
+                            for r in self.records[ns_target]:
+                                if QTYPE[r.rtype] == "A":
+                                    print("got here")
+                                    response.add_ar(r)
+
+                elif QTYPE[rr.rtype] == "CNAME":
+                    print("we sent a message with CNAME")
                     response.add_answer(rr)
                     cname_target = str(rr.rdata)
                     if cname_target in self.records:
@@ -74,13 +87,10 @@ class Server:
                             if a_rr.rtype == QTYPE.A:
                                 response.add_answer(a_rr)
 
-                elif rr.rtype == QTYPE.NS:
-                    print("got here %s" % rr.rdata)
-                    ns_target = str(rr.rdata)
-                    if ns_target in self.records:
-                        for r in self.records[ns_target]:
-                            if QTYPE[r.rtype] == QTYPE.A:
-                                response.add_rrset(r)
+
+
+
+
 
 
         self.send(addr, response)
