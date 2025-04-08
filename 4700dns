@@ -1,8 +1,13 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math
-from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A
+from pydoc import resolve
+
+
+from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A, dns
+import dns.resolver
 from io import StringIO
+
 
 class Server:
     def __init__(self, root_ip, domain, port):
@@ -45,62 +50,146 @@ class Server:
             else:
                 self.records[name] = [rr]
 
+    def forward_helper(self, client_request, ip):
+        forward_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        forward_sock.settimeout(2)
+        try:
+            # dns_request = DNSRecord.question(client_request)
+            # print(f"this is the dns request {dns_request}")
+            forward_sock.sendto(client_request.pack(), (ip, 53))
+            # print(f" this the client request: {client_request} and the root ip: {self.root_ip}")
+            data, addr = forward_sock.recvfrom(65535)
+            print(f"this is the data {data}")
+            forward_response = DNSRecord.parse(data)
+            print(f"DEBUG got this response: {forward_response}")
+            # forward_response.header.aa = 0
+            return forward_response
+        except Exception as e:
+            print(f"Exception: {e}")
+            return None
+        finally:
+            forward_sock.close()
+
+    def forward_request(self, client_request, ip):
+        response = None
+        query = client_request  # Original query from client (DNSRecord object)
+        current_ip = self.root_ip
+
+        for _ in range(10): # TO DO: CHANGE LATER
+            # we get the response
+            response = self.forward_helper(client_request, ip)
+            if response is None:
+                print("REPONSE NOT UPDATE")
+                break
+
+        # check if the answer section is empty
+            if response.rr:
+                print("ACTUALLY GOT ONE")
+                response.header.aa = 0
+                return response
+
+        # NOW LOOKING THROUGH BOTH THE NS AN A RECORDS
+        ns_records = response.auth
+        print(f"THIS IS THE NS {ns_records}")
+        additional_records = response.additional_records
+        print(f"THIS IS THE ADDITIONALL {additional_records}")
+
+        next_ip = None
+        # FIRST LOOK IF WE DO HAVE ADDITIONAL RECORDS WIH THE NS NAMES
+        for a in additional_records:
+            if a.rtype == QTYPE.SOA:
+                next_ip = a.rname
+                break
+
+        if not next_ip and ns_records:
+            for ns in ns_records:
+                if QTYPE[ns.rtype] == "NS":
+                    ns_domain = str(ns.data) # get the domain name
+                    print(f"Resolving NS domain: {ns_domain}")
+                    ns_query = DNSRecord.question(ns_domain)
+                    ns_response = self.forward_helper(ns_query, current_ip)
+                    if ns_response:
+                        for rr in ns_response.rr:
+                            if rr.rtype == QTYPE.A:
+                                next_ip = str(rr.rdata)
+                                break
+
+                    if next_ip:
+                        break
+
+        if next_ip:
+            current_ip = next_ip
+        else:
+
+            print("No next IP found; stopping recursion")
+
+
+
+
+
 
 
     def recv(self, socket):
-        data, addr = socket.recvfrom(65535)
+            data, addr = socket.recvfrom(65535)
+            # Parse DNS request
+            request = DNSRecord.parse(data)
+            self.log("Received message:\n%s" % request)
 
-        # Parse DNS request
-        request = DNSRecord.parse(data)
+            qname = str(request.q.qname)
+            qtype = QTYPE[request.q.qtype]
 
-        self.log("Received message:\n%s" % request)
+            response = request.reply()
+            if qname in self.records:
+                for rr in self.records[qname]:
+                    # print("this is the types: ", QTYPE[rr.rtype])
+                    if QTYPE[rr.rtype] == qtype or qtype == "ANY":
+                        response.add_answer(rr)
+                        # print("we sent a message with this types: ", QTYPE[rr.rtype], "and the qtype: ", qtype)
 
-        qname = str(request.q.qname)
-        qtype = QTYPE[request.q.qtype]
+                        if QTYPE[rr.rtype] == "NS":
+                            # print("this is we got her")
+                            ns_target = str(rr.rdata)
+                            if ns_target in self.records:
+                                response.add_auth(rr)
+                                for r in self.records[ns_target]:
+                                    if QTYPE[r.rtype] == "A":
+                                        # print("got here")
+                                        response.add_ar(r)
 
-        response = request.reply()
-
-
-        if qname in self.records:
-            for rr in self.records[qname]:
-                print("this is the types: ", QTYPE[rr.rtype])
-                if QTYPE[rr.rtype] == qtype or qtype == "ANY":
-                    response.add_answer(rr)
-                    print("we sent a message with this types: ", QTYPE[rr.rtype], "and the qtype: ", qtype)
-
-                    if QTYPE[rr.rtype] == "NS":
-                        print("this is we got her")
-                        ns_target = str(rr.rdata)
-                        if ns_target in self.records:
-                            response.add_auth(rr)
-                            for r in self.records[ns_target]:
-                                if QTYPE[r.rtype] == "A":
-                                    print("got here")
-                                    response.add_ar(r)
-
-                elif QTYPE[rr.rtype] == "CNAME":
-                    print("we sent a message with CNAME")
-                    response.add_answer(rr)
-                    cname_target = str(rr.rdata)
-                    if cname_target in self.records:
-                        for a_rr in self.records[cname_target]:
-                            if a_rr.rtype == QTYPE.A:
-                                response.add_answer(a_rr)
-        else:
-            print("reached here")
-            if qname.endswith(self.auth_domain):
-                response.header.rcode = 3
-                if self.auth_domain in self.records:
-                    for rr in self.records[self.auth_domain]:
-                        response.add_auth(rr)
-    
+                    elif QTYPE[rr.rtype] == "CNAME":
+                        # print("we sent a message with CNAME")
+                        response.add_answer(rr)
+                        cname_target = str(rr.rdata)
+                        if cname_target in self.records:
+                            for a_rr in self.records[cname_target]:
+                                if a_rr.rtype == QTYPE.A:
+                                    response.add_answer(a_rr)
             else:
-                self.log("No record found for %s which is outside our domain." % qname)
-                    
+                if qname.endswith(self.auth_domain):
+                    response.header.rcode = 3
+                    if self.auth_domain in self.records:
+                        for rr in self.records[self.auth_domain]:
+                            response.add_auth(rr)
 
-        self.send(addr, response)
+                else:
+                    self.log("No record found for %s which is outside our domain." % qname)
+                    forward_response = self.forward_helper(request, self.root_ip)
+                    print(f"got this response: {forward_response}")
+                    if forward_response:
+                        print("sending forward_response")
+                        self.send(addr, forward_response)
+                    else:
+                        print("sending a failed forward_response")
+                        response.header.rcode = 2 #SERVER FAIL
+                        self.send(addr, response)
 
 
+
+            self.send(addr, response)
+
+
+
+    ## get the response and give back to the client
     def in_zone(self, name):
         return name == self.auth_domain
 
