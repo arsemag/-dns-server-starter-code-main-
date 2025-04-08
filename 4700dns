@@ -47,61 +47,65 @@ class Server:
             else:
                 self.records[name] = [rr]
 
-    def forward_request(self, client_request, ip):
+    def forward_request(self, client_request):
         original_domain = client_request.q.qname
-        current_ip = self.root_ip
+        current_ip = self.root_ip  # Start with the root server
 
-        for _ in range(10):  # Maximum iterations (could be configurable)
-            # Build a fresh query based on the original domain
+        # Maximum iterations to avoid an infinite loop.
+        for iteration in range(10):
+            # Rebuild a fresh query for each iteration.
             query = DNSRecord.question(str(original_domain))
             response = self.forward_helper(query, current_ip)
             if response is None:
-                print("Response not updated")
-                break
+                print("No response from", current_ip)
+                break  # You may want to return an error here.
 
-            # Return immediately if we have an answer
+            # If we got an answer, stop.
             if response.rr:
-                print("Actually got one")
+                print("Received answer at", current_ip)
                 response.header.aa = 0
                 return response
 
-            # Inspect NS and additional sections for delegation info
+            # No answer; check for NS records in the referral.
             ns_records = response.auth
-            print(f"NS records: {ns_records}")
             additional_records = response.additional_records
-            print(f"Additional records: {additional_records}")
 
             next_ip = None
-            # Check additional records for an A record (NS IP)
+
+            # First try to get an A record from the additional section.
             for a in additional_records:
                 if a.rtype == QTYPE.A:
                     next_ip = str(a.rdata)
+                    print("Found next IP in additional:", next_ip)
                     break
 
-            # If no IP in additional, try to resolve an NS domain from auth records
+            # If no A record was found in the additional section,
+            # explicitly resolve an NS record from the authority section.
             if not next_ip and ns_records:
                 for ns in ns_records:
                     if QTYPE[ns.rtype] == "NS":
-                        ns_domain = str(ns.data)  # NS domain name
-                        print(f"Resolving NS domain: {ns_domain}")
+                        ns_domain = str(ns.data)
+                        print("Resolving NS domain:", ns_domain)
                         ns_query = DNSRecord.question(ns_domain)
-                        ns_response = self.forward_helper(ns_query, current_ip)
+                        ns_response = self.forward_helper(ns_query, self.root_ip)
                         if ns_response:
                             for rr in ns_response.rr:
                                 if rr.rtype == QTYPE.A:
                                     next_ip = str(rr.rdata)
+                                    print("Resolved NS", ns_domain, "to", next_ip)
                                     break
                         if next_ip:
                             break
 
             if next_ip:
-                print(f"Forwarding next query to {next_ip}")
+                # Update the target server IP for the next query.
                 current_ip = next_ip
+                print("Forwarding next query to:", current_ip)
             else:
                 print("No next IP found; stopping recursion")
-                break  # Exit the loop if no further server is found
+                break
 
-        # If we exit the loop without a response, return what we got (or None)
+        # If no answer is found after the iterations, return the last response or None.
         return response
             
 
