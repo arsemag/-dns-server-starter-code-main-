@@ -86,12 +86,17 @@ class Server:
                         for a_rr in self.records[cname_target]:
                             if a_rr.rtype == QTYPE.A:
                                 response.add_answer(a_rr)
-
-
-
-
-
-
+        else:
+            print("reached here")
+            if qname.endswith(self.auth_domain):
+                response.header.rcode = 3
+                if self.auth_domain in self.records:
+                    for rr in self.records[self.auth_domain]:
+                        response.add_auth(rr)
+    
+            else:
+                self.log("No record found for %s which is outside our domain." % qname)
+                    
 
         self.send(addr, response)
 
