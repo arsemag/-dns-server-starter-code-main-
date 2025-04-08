@@ -2,10 +2,7 @@
 
 import argparse, socket, time, json, select, struct, sys, math
 from pydoc import resolve
-
-
 from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A, dns
-import dns.resolver
 from io import StringIO
 
 
@@ -77,7 +74,7 @@ class Server:
 
         for _ in range(10): # TO DO: CHANGE LATER
             # we get the response
-            response = self.forward_helper(client_request, ip)
+            response = self.forward_helper(client_request, current_ip)
             if response is None:
                 print("REPONSE NOT UPDATE")
                 break
@@ -122,11 +119,6 @@ class Server:
         else:
 
             print("No next IP found; stopping recursion")
-
-
-
-
-
 
 
     def recv(self, socket):
@@ -186,8 +178,6 @@ class Server:
 
 
             self.send(addr, response)
-
-
 
     ## get the response and give back to the client
     def in_zone(self, name):
