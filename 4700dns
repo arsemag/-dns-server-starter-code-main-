@@ -2,10 +2,7 @@
 
 import argparse, socket, time, json, select, struct, sys, math
 from pydoc import resolve
-
-
 from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A, dns
-import dns.resolver
 from io import StringIO
 
 
@@ -50,152 +47,111 @@ class Server:
             else:
                 self.records[name] = [rr]
 
-    def forward_helper(self, client_request, ip):
-        forward_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        forward_sock.settimeout(2)
-        try:
-            # dns_request = DNSRecord.question(client_request)
-            # print(f"this is the dns request {dns_request}")
-            forward_sock.sendto(client_request.pack(), (ip, 53))
-            # print(f" this the client request: {client_request} and the root ip: {self.root_ip}")
-            data, addr = forward_sock.recvfrom(65535)
-            forward_response = DNSRecord.parse(data)
-            # print(f"DEBUG got this response: {forward_response}")
-            # forward_response.header.aa = 0
-            return forward_response
-        except Exception as e:
-            print(f"Exception: {e}")
-            return None
-        finally:
-            forward_sock.close()
-
     def forward_request(self, client_request, ip):
-        response = None
-        query = client_request  # Original query from client (DNSRecord object)
+        original_domain = client_request.q.qname
         current_ip = self.root_ip
 
-        for _ in range(10): # TO DO: CHANGE LATER
-            # we get the response
-            print("we get here an stop")
+        for _ in range(10):  # Maximum iterations (could be configurable)
+            # Build a fresh query based on the original domain
+            query = DNSRecord.question(str(original_domain))
             response = self.forward_helper(query, current_ip)
             if response is None:
-                print("REPONSE NOT UPDATE") # does it get update
+                print("Response not updated")
                 break
 
-        # check if the answer section is empty
+            # Return immediately if we have an answer
             if response.rr:
-                print("ACTUALLY GOT ONE")
+                print("Actually got one")
                 response.header.aa = 0
-                response.header.ra = 1 ## ADDED THIS AND FIXED THE ISSUE
-                                       ## what it does ra flag is a signal to the client
-                                        # that this server supports recursive queries
                 return response
 
-        # NOW LOOKING THROUGH BOTH THE NS AN A RECORDS
-        ns_records = response.auth
-        print(f"THIS IS THE NS {ns_records}")
-        additional_records = response.ar
-        print(f"THIS IS THE ADDITIONALL {additional_records}")
+            # Inspect NS and additional sections for delegation info
+            ns_records = response.auth
+            print(f"NS records: {ns_records}")
+            additional_records = response.additional_records
+            print(f"Additional records: {additional_records}")
 
-        next_ip = None
-        # FIRST LOOK IF WE DO HAVE ADDITIONAL RECORDS WIH THE NS NAMES
-        for a in additional_records:
-            if a.rtype == QTYPE.A:
-                next_ip = a.rname
-                break
+            next_ip = None
+            # Check additional records for an A record (NS IP)
+            for a in additional_records:
+                if a.rtype == QTYPE.A:
+                    next_ip = str(a.rdata)
+                    break
 
-        if not next_ip and ns_records:
-            for ns in ns_records:
-                if QTYPE[ns.rtype] == "NS":
-                    ns_domain = str(ns.rdata) # get the domain name
-                    print(f"Resolving NS domain: {ns_domain}")
-                    ns_query = DNSRecord.question(ns_domain)
-                    ns_response = self.forward_helper(ns_query, current_ip)
-                    if ns_response:
-                        for rr in ns_response.rr:
-                            if rr.rtype == QTYPE.A:
-                                next_ip = str(rr.rdata)
-                                break
-
-                    if next_ip:
-                        break
+            # If no IP in additional, try to resolve an NS domain from auth records
+            if not next_ip and ns_records:
+                for ns in ns_records:
+                    if QTYPE[ns.rtype] == "NS":
+                        ns_domain = str(ns.data)  # NS domain name
+                        print(f"Resolving NS domain: {ns_domain}")
+                        ns_query = DNSRecord.question(ns_domain)
+                        ns_response = self.forward_helper(ns_query, current_ip)
+                        if ns_response:
+                            for rr in ns_response.rr:
+                                if rr.rtype == QTYPE.A:
+                                    next_ip = str(rr.rdata)
+                                    break
+                        if next_ip:
+                            break
 
             if next_ip:
-                print("GOT HERE")
+                print(f"Forwarding next query to {next_ip}")
                 current_ip = next_ip
-                print("the new current ip is: %s" % current_ip)
             else:
                 print("No next IP found; stopping recursion")
-                return None
+                break  # Exit the loop if no further server is found
 
-            return response  # Return final DNS response or None
-
-
-
-
-
-
+        # If we exit the loop without a response, return what we got (or None)
+        return response
+            
 
 
     def recv(self, socket):
-            data, addr = socket.recvfrom(65535)
-            # Parse DNS request
-            request = DNSRecord.parse(data)
-            self.log("Received message:\n%s" % request)
+        data, addr = socket.recvfrom(65535)
+        request = DNSRecord.parse(data)
+        self.log("Received message:\n%s" % request)
 
-            qname = str(request.q.qname)
-            qtype = QTYPE[request.q.qtype]
+        qname = str(request.q.qname)
+        qtype = QTYPE[request.q.qtype]
 
-            response = request.reply()
-            if qname in self.records:
-                for rr in self.records[qname]:
-                    # print("this is the types: ", QTYPE[rr.rtype])
-                    if QTYPE[rr.rtype] == qtype or qtype == "ANY":
-                        response.add_answer(rr)
-                        # print("we sent a message with this types: ", QTYPE[rr.rtype], "and the qtype: ", qtype)
-
-                        if QTYPE[rr.rtype] == "NS":
-                            # print("this is we got her")
-                            ns_target = str(rr.rdata)
-                            if ns_target in self.records:
-                                response.add_auth(rr)
-                                for r in self.records[ns_target]:
-                                    if QTYPE[r.rtype] == "A":
-                                        # print("got here")
-                                        response.add_ar(r)
-
-                    elif QTYPE[rr.rtype] == "CNAME":
-                        # print("we sent a message with CNAME")
-                        response.add_answer(rr)
-                        cname_target = str(rr.rdata)
-                        if cname_target in self.records:
-                            for a_rr in self.records[cname_target]:
-                                if a_rr.rtype == QTYPE.A:
-                                    response.add_answer(a_rr)
-            else:
-                if qname.endswith(self.auth_domain):
-                    response.header.rcode = 3
-                    if self.auth_domain in self.records:
-                        for rr in self.records[self.auth_domain]:
+        response = request.reply()
+        if qname in self.records:
+            for rr in self.records[qname]:
+                if QTYPE[rr.rtype] == qtype or qtype == "ANY":
+                    response.add_answer(rr)
+                    if QTYPE[rr.rtype] == "NS":
+                        ns_target = str(rr.rdata)
+                        if ns_target in self.records:
                             response.add_auth(rr)
-
-                else:
-                    self.log("No record found for %s which is outside our domain." % qname)
-                    forward_response = self.forward_request(request, self.root_ip)
-                    print(f"got this response: {forward_response}")
-                    if forward_response:
-                        print("sending forward_response") # so it is sending a the foward response
-                        self.send(addr, forward_response)
-                    else:
-                        print("sending a failed forward_response")
-                        response.header.rcode = 2 #SERVER FAIL
-                        self.send(addr, response)
-
-
-
+                            for r in self.records[ns_target]:
+                                if QTYPE[r.rtype] == "A":
+                                    response.add_ar(r)
+                elif QTYPE[rr.rtype] == "CNAME":
+                    response.add_answer(rr)
+                    cname_target = str(rr.rdata)
+                    if cname_target in self.records:
+                        for a_rr in self.records[cname_target]:
+                            if a_rr.rtype == QTYPE.A:
+                                response.add_answer(a_rr)
             self.send(addr, response)
-
-
+        else:
+            if qname.endswith(self.auth_domain):
+                response.header.rcode = 3
+                if self.auth_domain in self.records:
+                    for rr in self.records[self.auth_domain]:
+                        response.add_auth(rr)
+                self.send(addr, response)
+            else:
+                self.log("No record found for %s which is outside our domain." % qname)
+                # Use the recursive forwarding method instead of directly calling forward_helper
+                forward_response = self.forward_request(request, self.root_ip)
+                if forward_response:
+                    print("Sending forward_response")
+                    self.send(addr, forward_response)
+                else:
+                    print("Sending a failed forward_response")
+                    response.header.rcode = 2  # SERVER FAIL
+                    self.send(addr, response)
 
     ## get the response and give back to the client
     def in_zone(self, name):
