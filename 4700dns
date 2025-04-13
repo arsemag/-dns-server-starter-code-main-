@@ -106,7 +106,7 @@ class Server:
                         print("Resolving NS domain:", ns_domain)
                         ns_query = DNSRecord.question(ns_domain)
                         # Notice here we might want to use a known resolver (like the root) to resolve the NS.
-                        ns_response = self.forward_helper(ns_query, self.root_ip)
+                        ns_response = self.forward_request(ns_query, current_ip)
                         if ns_response:
                             for rr in ns_response.rr:
                                 if rr.rtype == QTYPE.A:
@@ -157,7 +157,8 @@ class Server:
                                 response.add_answer(a_rr)
             self.send(addr, response)
         else:
-            if qname.endswith(self.auth_domain):
+            ## just made the condition stricter so on specific domains can get in
+            if self.auth_domain and qname.endswith(self.auth_domain) and qname not in self.records:
                 response.header.rcode = 3
                 if self.auth_domain in self.records:
                     for rr in self.records[self.auth_domain]:
