@@ -49,87 +49,70 @@ class Server:
                 self.records[name] = [rr]
 
     def forward_helper(self, client_request, ip):
-        forward_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # creates the socket connection
+        forward_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         forward_sock.settimeout(2)
 
         try:
-            forward_sock.sendto(client_request.pack(), (ip, 60053)) #sends the request to the server
+            forward_sock.sendto(client_request.pack(), (ip, 60053))
             data, addr = forward_sock.recvfrom(65535)
-            forward_response = DNSRecord.parse(data) # parses the response and returns it
+            forward_response = DNSRecord.parse(data)
             return forward_response
-        except socket.timeout:
-            print("TIME OUTTT", file=sys.stderr)
-            return None
         except Exception as e:
             print(f"Error during DNS forwarding: {e}", file=sys.stderr)
             return None
         finally:
             forward_sock.close()
 
-    def forward_request(self, client_request, ip):
-        response = None
-        query = client_request  # Original query from client (DNSRecord object)
-        current_ip = self.root_ip
+    def forward_request(self, client_request, ip, depth=0):
+        if depth > 10:  # prevent recurising too much
+            return None
 
-        for _ in range(10): # TO DO: CHANGE LATER
-            response = self.forward_helper(query, ip)
-            if response is None:
-                print("REPONSE NOT UPDATE") # does it get update
+        response = self.forward_helper(client_request, ip) # talk to the another socket and get a reponse
+        if response is None:
+            return None
+
+        # If we got an answer, return it
+        if response.rr:
+            response.header.aa = 0
+            response.header.ra = 1
+            return response
+
+        # Look for NS records in authority section
+        ns_records = response.auth
+        next_ip = None
+
+        # First try to find A records in additional section
+        for rr in response.ar:
+            if rr.rtype == QTYPE.A:
+                next_ip = str(rr.rdata)
                 break
-        # check if the answer section is empty
-            if response.rr:
-                print("ACTUALLY GOT ONE")
-                response.header.aa = 0
-                response.header.ra = 1 ## ADDED THIS AND FIXED THE ISSUE
-                                       ## what it does ra flag is a signal to the client
-                                      # that this server supports recursive queries
-                return response
 
-
-        # NOW LOOKING THROUGH BOTH THE NS AN A RECORDS
-        ns_records = response.auth ## we look through authority records for the ns_records
-        print(f"THIS IS THE NS {ns_records}")
-        # additional_records = response.ar ## we
-        # print(f"THIS IS THE ADDITIONALL {additional_records}")
-
-        next_ip = None  # will be the next_ip address to visit
-
-        # for rr in response.ar:
-        #     if rr.rtype == QTYPE.A:
-        #         next_ip = str(rr.rdata)
-        #         break
-
+        # If no A records found, query for NS records
         if not next_ip and ns_records:
             for ns in ns_records:
                 if QTYPE[ns.rtype] == "NS":
-                    print("we found ns records for the request")
-                    ns_domain = str(ns.rdata) # get the domain name
-                    print(f"this is the NS {ns_domain}")
-                    ns_query = DNSRecord.question(ns_domain) # ask other DNS server for the ip address
-                    print("current ip", current_ip)
-                    ns_response = self.forward_helper(ns_query, current_ip) # forward it to the DNS servers
-                    print("this is the ns_response", ns_response)
-                    if ns_response:
-                        print("we found ns_records for the request 2")
-                        print(f"these are the records {ns_response.rr}")
-                        for rr in ns_response.ar:
-                            print(f"this is these are the records {rr} + \n + \n")
-                            print("we found the A record for the ns")
-                            next_ip = str(rr.rdata) # once we find a records we get the ip address
-                            print("this is the next ip", next_ip)
+                    ns_domain = str(ns.rdata)
+                    # Create a new query for the NS domain's A record
+                    ns_query = DNSRecord.question(ns_domain, QTYPE.A)
+                    ns_response = self.forward_helper(ns_query, self.root_ip)  # Start from root
 
-            if next_ip:
-                print("REPONSE GOT ONE")
-                response = self.forward_helper(query, next_ip)
-                if response and response.rr:
-                    response.header.aa = 0
-                    response.header.ra = 1
-                    return response
+                    if ns_response and ns_response.rr:
+                        for rr in ns_response.rr:
+                            if rr.rtype == QTYPE.A:
+                                next_ip = str(rr.rdata)
+                                break
+                        if next_ip:
+                            break
 
+        if next_ip:
+            # Recursively query the next nameserver
+            return self.forward_request(client_request, next_ip, depth + 1)
 
+        # If we get here, we couldn't find an answer
         response.header.aa = 0
         response.header.ra = 1
         return response
+
 
     def recv(self, socket):
             data, addr = socket.recvfrom(65535)
