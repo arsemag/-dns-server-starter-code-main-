@@ -4,7 +4,7 @@ import argparse, socket, time, json, select, struct, sys, math
 from pydoc import resolve
 
 
-from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A, dns, DNSQuestion
+from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A, dns
 import dns.resolver
 from io import StringIO
 
@@ -20,12 +20,6 @@ class Server:
 
         self.log("Bound to port %d" % self.port)
 
-        self.list_of_sockets = []
-        self.list_of_sockets.append(self.socket)
-
-        self.client_to_request = {} ### client : request
-        self.socket_to_addr = {} ## socket : ip add
-
         self.records = {}  # Add this before calling parse_zone_file
         self.auth_domain = None
         self.parse_zone_file(domain)
@@ -34,9 +28,9 @@ class Server:
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
 
-    def send(self, addr, message, sock):
+    def send(self, addr, message):
         self.log("Sending message:\n%s" % message)
-        sock.sendto(message.pack(), addr)
+        self.socket.sendto(message.pack(), addr)
 
     def parse_zone_file(self, file_path):
         with open(file_path, 'r') as f:
@@ -54,26 +48,26 @@ class Server:
             else:
                 self.records[name] = [rr]
 
-    # def forward_helper(self, client_request, ip):
-    #     forward_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    #     forward_sock.settimeout(2)
-    #
-    #     try:
-    #         forward_sock.sendto(client_request.pack(), (ip, 60053))
-    #         data, addr = forward_sock.recvfrom(65535)
-    #         forward_response = DNSRecord.parse(data)
-    #         return forward_response
-    #     except Exception as e:
-    #         print(f"Error during DNS forwarding: {e}", file=sys.stderr)
-    #         return None
-    #     finally:
-    #         forward_sock.close()
+    def forward_helper(self, client_request, ip):
+        forward_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        forward_sock.settimeout(2)
 
-    def forward_request(self, client_request, ip, response, sock,  depth=0):
+        try:
+            forward_sock.sendto(client_request.pack(), (ip, 60053))
+            data, addr = forward_sock.recvfrom(65535)
+            forward_response = DNSRecord.parse(data)
+            return forward_response
+        except Exception as e:
+            print(f"Error during DNS forwarding: {e}", file=sys.stderr)
+            return None
+        finally:
+            forward_sock.close()
+
+    def forward_request(self, client_request, ip, depth=0):
         if depth > 10:  # prevent recurising too much
             return None
 
-
+        response = self.forward_helper(client_request, ip) # talk to the another socket and get a reponse
         if response is None:
             return None
 
@@ -100,8 +94,8 @@ class Server:
                     ns_domain = str(ns.rdata)
                     # Create a new query for the NS domain's A record
                     ns_query = DNSRecord.question(ns_domain, QTYPE.A)
-                    self.send(ip, ns_query, sock)
-                    ns_response = ns_query.reply()
+                    ns_response = self.forward_helper(ns_query, self.root_ip)  # Start from root
+
                     if ns_response and ns_response.rr:
                         for rr in ns_response.rr:
                             if rr.rtype == QTYPE.A:
@@ -112,7 +106,7 @@ class Server:
 
         if next_ip:
             # Recursively query the next nameserver
-            self.forward_request(client_request, next_ip, sock, depth + 1)
+            return self.forward_request(client_request, next_ip, depth + 1)
 
         # If we get here, we couldn't find an answer
         response.header.aa = 0
@@ -120,8 +114,8 @@ class Server:
         return response
 
 
-    def recv(self, sock):
-            data, addr = sock.recvfrom(65535)
+    def recv(self, socket):
+            data, addr = socket.recvfrom(65535)
             request = DNSRecord.parse(data)
             self.log("Received message:\n%s" % request)
 
@@ -145,25 +139,9 @@ class Server:
                             response.add_auth(rr)
 
                 else:
-                    new_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    new_socket.bind(("0.0.0.0", 0))
-                    self.list_of_sockets.append(new_socket)
+                    self.send_outside_zone(request, addr, response)
 
-                    domain_name = qname.split(".")
-                    domain_name = [part + "." for part in domain_name]
-                    last = domain_name.pop()
-
-
-                    question = DNSRecord(q=DNSQuestion(last, QTYPE.NS))
-                    response = question.reply()
-
-                    self.client_to_request[addr] = request
-                    self.socket_to_addr[new_socket] = addr
-
-                    self.send((self.root_ip, 53), question, new_socket)
-                    print("sent to root server")
-
-            self.send(addr, response, self.socket) #TODO: check if this is correct
+            self.send(addr, response)
 
     def ns_case(self, record, response):
         # print("this is we got her")
@@ -183,23 +161,16 @@ class Server:
                 if a_rr.rtype == QTYPE.A:
                     response.add_answer(a_rr)
 
-    def send_outside_zone(self, sock):
-        data, addr = sock.recvfrom(65535)
-        request = DNSRecord.parse(data)
-        self.log("Received message outside zone:\n%s" % request)
-
-        response = request.reply()
-        print(f"this is the response {response}")
-        forward_response = self.forward_request(request, self.root_ip, response, sock)
-
+    def send_outside_zone(self, request, addr, response):
+        forward_response = self.forward_request(request, self.root_ip)
         # print(f"got this response: {forward_response}")
         if forward_response:
-            print(f"sending forward_response {forward_response} and this is the addr {addr}") # so it is sending a the foward response
-            self.send(addr, forward_response, sock)
+            # print(f"sending forward_response and this is the add {addr}") # so it is sending a the foward response
+            self.send(addr, forward_response)
         else:
-            print("FAILED")
+            # print("sending a failed forward_response")
             response.header.rcode = 2  # SERVER FAIL
-            self.send(addr, response, sock)
+            self.send(addr, response)
 
 
     ## get the response and give back to the client
@@ -209,16 +180,9 @@ class Server:
     def run(self):
         seq = 0
         while True:
-            socks = select.select(self.list_of_sockets, [], [], 0.1)[0]
-            print(f"this is the socks {socks}")
+            socks = select.select([self.socket], [], [], 0.1)[0]
             for conn in socks:
-
-                if self.socket_to_addr.get(conn) is None:
-                        self.recv(conn)
-                else:
-                    print("GOT TO OUTSIDE ZONE")
-                    self.send_outside_zone(conn)
-
+                self.recv(conn)
 
         return
 
