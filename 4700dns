@@ -1,12 +1,11 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math
-from pydoc import resolve
+
 
 
 from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A, dns
-import dns.resolver
-from io import StringIO
+
 
 
 class Server:
