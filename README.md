@@ -2,7 +2,7 @@
 Project 6 - DNS Server
 This project involves creating a DNS server that handles DNS queries through recursion. When the server receives a DNS query, it first checks if the query is in its authoritative domain. If it is, the server responds using the local DNS records. If the query is not in the authoritative domain, the server forwards the request to the root server and recursively follows NS records until it finds the correct A record with the response. The response is then forwarded back to the client.
 
-Challenges
+*** Challenges *** 
 During development, we encountered issues with parallel processing, particularly with looping through multiple sockets to handle DNS queries simultaneously. We were able to process DNS requests one at a time, but struggled with implementing parallelism. Additionally, understanding and implementing recursion with NS records was a challenge, but we ultimately figured out how to recurse properly and get the right response.
 
 **** Features ****
