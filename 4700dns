@@ -2,70 +2,65 @@
 
 import argparse, socket, time, json, select, struct, sys, math
 from dnslib import DNSRecord, DNSHeader, RR, QTYPE, A, dns
-import dns.resolver
-from io import StringIO
+
 
 class Server:
     def __init__(self, root_ip, domain, port):
-        self.root_ip = root_ip
-        self.domain = domain
-
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.socket.bind(("0.0.0.0", port))
-        self.socket.setblocking(False)  # Set to non-blocking
-        self.port = self.socket.getsockname()[1]
-
+        self.root_ip = root_ip  # Root server IP address
+        self.domain = domain  # Zone file path
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # Create UDP socket
+        self.socket.bind(("0.0.0.0", port))  # Bind to all interfaces
+        self.socket.setblocking(False)  # Set socket to non-blocking mode
+        self.port = self.socket.getsockname()[1]  # Get the assigned port
         self.log("Bound to port %d" % self.port)
 
-        self.records = {}  # Add this before calling parse_zone_file
-        self.auth_domain = None
-        self.parse_zone_file(domain)
+        self.records = {}  # DNS records storage
+        self.auth_domain = None  # Authoritative domain
+        self.parse_zone_file(domain)  # Parse the zone file
 
-        # Track pending requests: {socket: (client_addr, original_request, start_time)}
-        self.pending_requests = {}
+        self.pending_requests = {}  # Track pending requests for forwarding
 
     def log(self, message):
-        sys.stderr.write(message + "\n")
+        sys.stderr.write(message + "\n")  # Log messages to stderr
         sys.stderr.flush()
 
     def send(self, addr, message):
-        self.log("Sending message:\n%s" % message)
-        self.socket.sendto(message.pack(), addr)
+        self.log("Sending message:\n%s" % message)  # Log the outgoing message
+        self.socket.sendto(message.pack(), addr)  # Send the DNS response
 
     def parse_zone_file(self, file_path):
         with open(file_path, 'r') as f:
-            zone_text = f.read()
-        for rr in RR.fromZone(zone_text):
-            if rr.rtype == QTYPE.SOA:
-                self.auth_domain = str(rr.rname)
+            zone_text = f.read()  # Read the zone file
+        self.log("Parsed Zone File Content:\n" + zone_text)
+        for rr in RR.fromZone(zone_text):  # Parse each record
+            if rr.rtype == QTYPE.SOA:  # Identify SOA record
+                self.auth_domain = str(rr.rname)  # Set authoritative domain
                 self.log("Found SOA record for domain: %s" % self.auth_domain)
-            name = str(rr.rname).lower().rstrip('.')
+            name = str(rr.rname).lower().rstrip('.')  # Normalize record name
             if name in self.records:
-                self.records[name].append(rr)
+                self.records[name].append(rr)  # Append to existing records
             else:
-                self.records[name] = [rr]
+                self.records[name] = [rr]  # Create new record entry
 
     def create_forward_socket(self):
-        """Create a new non-blocking socket for forwarding queries."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setblocking(False)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # Create UDP socket
+        sock.setblocking(False)  # Set to non-blocking
         return sock
 
     def forward_helper(self, client_request, ip, forward_sock):
-        """Send a request using the provided socket and return the socket for select."""
         try:
-            forward_sock.sendto(client_request.pack(), (ip, 60053))
+            forward_sock.sendto(client_request.pack(), (ip, 60053))  # Forward DNS query
             return forward_sock
         except Exception as e:
-            self.log(f"Error during DNS forwarding: {e}")
+            self.log(f"Error during DNS forwarding: {e}")  # Log errors
             forward_sock.close()
             return None
 
     def forward_request(self, client_request, ip, client_addr, depth=0):
-        if depth > 20:
+        if depth > 20:  # Prevent excessive recursion
             return None
 
-        forward_sock = self.create_forward_socket()
+        forward_sock = self.create_forward_socket()  # Create forwarding socket
         if not self.forward_helper(client_request, ip, forward_sock):
             return None
 
@@ -74,30 +69,27 @@ class Server:
         return None
 
     def handle_pending_responses(self):
-        """Check all pending sockets for responses."""
         current_time = time.time()
-        timeout = 2  # 2 seconds timeout
+        timeout = 2  # Timeout for pending requests
 
-        # Get sockets that are ready to read
-        socks = list(self.pending_requests.keys())
+        socks = list(self.pending_requests.keys())  # Get all pending sockets
         if not socks:
             return
 
-        ready_socks, _, _ = select.select(socks, [], [], 0.1)
+        ready_socks, _, _ = select.select(socks, [], [], 0.1)  # Check for ready sockets
         for sock in ready_socks:
             try:
-                data, _ = sock.recvfrom(65535)
+                data, _ = sock.recvfrom(65535)  # Receive response
                 pending = self.pending_requests.pop(sock)
                 client_addr, client_request, start_time, ip, depth = pending
 
-                forward_response = DNSRecord.parse(data)
+                forward_response = DNSRecord.parse(data)  # Parse DNS response
                 forward_response.header.tc = 0  # Clear truncation flag
 
-                # If we got an answer, return it to client
-                if forward_response.rr:
-                    forward_response.header.aa = 0
-                    forward_response.header.ra = 1
-                    self.send(client_addr, forward_response)
+                if forward_response.rr:  # If response contains answers
+                    forward_response.header.aa = 0  # Not authoritative
+                    forward_response.header.ra = 1  # Recursion available
+                    self.send(client_addr, forward_response)  # Send response to client
                     sock.close()
                     continue
 
@@ -105,35 +97,25 @@ class Server:
                 ns_records = forward_response.auth
                 next_ip = None
 
-                # First try to find A records in additional section
-                for rr in forward_response.ar:
+                for rr in forward_response.ar:  # Check additional section for A records
                     if rr.rtype == QTYPE.A:
                         next_ip = str(rr.rdata)
                         break
 
-                # If no A records found, we need to resolve the NS records
-                if not next_ip and ns_records:
+                if not next_ip and ns_records:  # Resolve NS records if no A records found
                     for ns in ns_records:
                         if QTYPE[ns.rtype] == "NS":
                             ns_domain = str(ns.rdata)
-                            # Create a new query for the NS domain's A record
-                            ns_query = DNSRecord.question(ns_domain, QTYPE.A)
-
-                            # Start new resolution from root for the NS record's A record
+                            ns_query = DNSRecord.question(ns_domain, QTYPE.A)  # Query for NS A record
                             self.forward_request(ns_query, self.root_ip, client_addr, depth + 1)
-
-                            # Store the original request to continue after we get the NS IP
-                            self.pending_ns_queries[ns_domain] = (client_request, client_addr, depth)
                             break
 
                     sock.close()
                     continue
 
-                if next_ip:
-                    # Recursively query the next nameserver with original request
+                if next_ip:  # Recursively query next nameserver
                     self.forward_request(client_request, next_ip, client_addr, depth + 1)
-                else:
-                    # If we get here, we couldn't find an answer
+                else:  # No answer found
                     forward_response.header.aa = 0
                     forward_response.header.ra = 1
                     self.send(client_addr, forward_response)
@@ -144,8 +126,7 @@ class Server:
                 self.log(f"Error handling pending response: {e}")
                 sock.close()
 
-        # Check for timeouts
-        for sock in list(self.pending_requests.keys()):
+        for sock in list(self.pending_requests.keys()):  # Check for timeouts
             _, _, start_time, _, _ = self.pending_requests[sock]
             if current_time - start_time > timeout:
                 sock.close()
@@ -153,68 +134,54 @@ class Server:
 
     def recv(self, socket):
         try:
-            data, addr = socket.recvfrom(65535)
-            request = DNSRecord.parse(data)
+            data, addr = socket.recvfrom(65535)  # Receive DNS query
+            request = DNSRecord.parse(data)  # Parse DNS query
             self.log(f"Received query for {request.q.qname} type {QTYPE[request.q.qtype]}")
 
-            qname = str(request.q.qname).lower().rstrip('.')
-            qtype = QTYPE[request.q.qtype]
+            qname = str(request.q.qname).lower().rstrip('.')  # Normalize query name
+            qtype = QTYPE[request.q.qtype]  # Query type
 
-            response = request.reply()
-            response.header.tc = 0  # Explicitly clear truncation flag
+            response = request.reply()  # Create DNS response
+            response.header.tc = 0  # Clear truncation flag
 
-            # Check if we have records for this query
-            if qname in self.records:
+            if qname in self.records:  # Check if record exists
                 found = False
                 for rr in self.records[qname]:
                     if QTYPE[rr.rtype] == qtype or qtype == "ANY":
                         response.add_answer(rr)
                         found = True
-                        # Special handling for NS records
-                        if QTYPE[rr.rtype] == "NS":
+                        if QTYPE[rr.rtype] == "NS":  # Handle NS records
                             ns_domain = str(rr.rdata).lower().rstrip('.')
                             if ns_domain in self.records:
                                 for ns_rr in self.records[ns_domain]:
                                     if QTYPE[ns_rr.rtype] == "A":
                                         response.add_ar(ns_rr)
-                    elif QTYPE[rr.rtype] == "CNAME":
-                        response.add_answer(rr)
-                        found = True
-                        cname_target = str(rr.rdata).lower().rstrip('.')
-                        if cname_target in self.records:
-                            for a_rr in self.records[cname_target]:
-                                if QTYPE[a_rr.rtype] == "A":
-                                    response.add_answer(a_rr)
 
                 if found:
+                    response.header.aa = 1  # Authoritative answer
                     self.send(addr, response)
                     return
 
-            # Handle authoritative NXDOMAIN
-            if qname.endswith(self.auth_domain):
+            if qname.endswith(self.auth_domain):  # Handle NXDOMAIN
                 response.header.rcode = 3  # NXDOMAIN
-                # Add SOA record in authority section
                 if self.auth_domain in self.records:
                     for rr in self.records[self.auth_domain]:
                         if QTYPE[rr.rtype] == "SOA":
                             response.add_auth(rr)
                 self.send(addr, response)
             else:
-                # Forward to root server
-                self.send_outside_zone(request, addr, response)
+                self.send_outside_zone(request, addr, response)  # Forward query outside zone
 
         except BlockingIOError:
             pass  # No data available
         except Exception as e:
             self.log(f"Error in recv: {e}")
-            # Send SERVFAIL on unexpected errors
             response = DNSRecord(DNSHeader())
-            response.header.rcode = 2
+            response.header.rcode = 2  # SERVER FAIL
             response.header.tc = 0
-            # self.send(addr, response)
 
     def ns_case(self, record, response):
-        ns_target = str(record.rdata)
+        ns_target = str(record.rdata)  # NS target domain
         if ns_target in self.records:
             response.add_auth(record)
             for r in self.records[ns_target]:
@@ -222,27 +189,22 @@ class Server:
                     response.add_ar(r)
 
     def cname_case(self, record, response):
-        response.add_answer(record)
+        response.add_answer(record)  # Add CNAME record to response
         cname_target = str(record.rdata)
         if cname_target in self.records:
             for a_rr in self.records[cname_target]:
                 if a_rr.rtype == QTYPE.A:
                     response.add_answer(a_rr)
 
-
     def send_outside_zone(self, request, addr, response):
-        self.forward_request(request, self.root_ip, addr)
-
+        self.forward_request(request, self.root_ip, addr)  # Forward query to root server
 
     def run(self):
         while True:
-            # Handle incoming client requests
-            socks = select.select([self.socket], [], [], 0.1)[0]
+            socks = select.select([self.socket], [], [], 0.1)[0]  # Check for incoming requests
             for conn in socks:
-                self.recv(conn)
-
-            # Handle pending forwarded requests
-            self.handle_pending_responses()
+                self.recv(conn)  # Handle client requests
+            self.handle_pending_responses()  # Handle forwarded requests
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='send data')

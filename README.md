@@ -1,17 +1,49 @@
-# -dns-server-starter-code-main-
+## DNS Server
+Project 6 - DNS Server
+This project involves creating a DNS server that handles DNS queries through recursion. When the server receives a DNS query, it first checks if the query is in its authoritative domain. If it is, the server responds using the local DNS records. If the query is not in the authoritative domain, the server forwards the request to the root server and recursively follows NS records until it finds the correct A record with the response. The response is then forwarded back to the client.
+
+Challenges
+During development, we encountered issues with parallel processing, particularly with looping through multiple sockets to handle DNS queries simultaneously. We were able to process DNS requests one at a time, but struggled with implementing parallelism. Additionally, understanding and implementing recursion with NS records was a challenge, but we ultimately figured out how to recurse properly and get the right response.
+
+**** Features ****
+Recursive Query Handling: The server can forward requests to external DNS servers if the query is outside its authoritative domain.
+
+Support for NS Records: The server can resolve NS records by recursively querying through name servers, starting from the root and progressing down the DNS hierarchy.
+
+Efficient Query Resolution: Once the query is resolved, the server responds with the appropriate A record, or an NXDOMAIN if the record is not found.
+
+*** Functions **** 
 
 
-## Project 6 - DNS Server
-Our DNS server takes the approach of managing DNS queries from clients through recursion. First we check if we are able to get the response ourselves because it is in our authoritative domain. If it is, then we are able to simply respond using the information in our records and send the response back to the client that sent the query. If it is not in our authoritative domain, then we forward the request out to get a response. We start and the root and recur down through NS records to finally get to a A record that contains the response we are looking for. Then we forward that response back to our client
+__init__(self, root_ip, domain, port)
+Purpose: Initializes the server, binds the socket, parses the zone file, and prepares the server to receive DNS queries.
 
-## Challenges
-We could not get our in parallel step to work. We are able to do everything one at a time but for some reason when we attempt to implement looping through our sockets, and doing things at the same time it wouldn't work. We had trouble figuring out the recursive part of the assignment as well, but eventually figured out how to properly recur through the NS records to get the right response.
+log(self, message): Logs messages to the standard error output for debugging and tracking purposes.
 
-## Features
-Our script is able to recur through NS records to get a response starting at the root server. This way if a query is not within our authoritative zone, we are still able to respond to the client's request by contacting other DNS servers. 
+send(self, addr, message): Sends the DNS response back to the client.
 
-## Funtions
+parse_zone_file(self, file_path): Reads and parses the zone file to store DNS records for authoritative responses.
 
 
-## Testing
-In order to debug our code we used the config files provided in the assignment and print statements to figure out where the code stopped working. This was we could determine if we ever got a response and were not properly sending it back to the client or if we were never getting a response in the first place. This helped us to target where we went to fix the code and what function was failing. 
+create_forward_socket(self): Creates a UDP socket for forwarding DNS queries to other DNS servers.
+
+forward_helper(self, client_request, ip, forward_sock): Forwards a client DNS query to a given IP address (typically to another DNS server).
+
+forward_request(self, client_request, ip, client_addr, depth=0): Recursively forwards a DNS query to other DNS servers, starting with the root server.
+
+handle_pending_responses(self): Handles pending responses from forwarded DNS queries, managing timeouts and processing responses when they arrive.
+
+recv(self, socket): Receives DNS queries from the client and processes them, either resolving them locally or forwarding them if necessary.
+
+
+ns_case(self, record, response): Handles NS records by adding them to the authority section of the response and resolving any additional A records.
+
+
+cname_case(self, record, response): Handles CNAME records by adding them to the response and resolving any additional A records.
+
+send_outside_zone(self, request, addr, response): Forwards a DNS query to a root DNS server or external DNS server when the query is not within the authoritative zone.
+
+run(self): Runs the DNS server, listening for incoming DNS queries and processing them as they arrive.
+
+Testing
+To test and debug the server, we used the configuration files provided in the assignment and incorporated print statements to track the flow of the code. This allowed us to identify whether the server was receiving and processing responses correctly, or if it was failing to obtain responses. By tracking where the failure occurred, we were able to target specific functions and address issues such as socket management and recursion. This iterative process helped us refine our solution and ensure that the server was handling DNS queries properly.
